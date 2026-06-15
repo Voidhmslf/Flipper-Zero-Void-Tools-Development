@@ -2,6 +2,7 @@
 #include <gui/gui.h>
 #include <gui/elements.h>
 #include <input/input.h>
+#include <furi_hal_infrared.h>
 
 // --- События и состояния ---
 
@@ -39,6 +40,13 @@ typedef struct {
     uint32_t remaining_seconds;
     uint32_t current_shot;
 } IntervalometerModel;
+
+// --- IR Команды ---
+
+static void canon_shoot_ir() {
+    const uint32_t canon_timings[] = {480, 7330, 480};
+    furi_hal_infrared_tx(38000, 0.33f, canon_timings, 3);
+}
 
 // --- Отрисовка (View) ---
 
@@ -268,7 +276,7 @@ int32_t template_app(void* p) {
                     
                     // Когда время вышло, делаем снимок
                     if (model->remaining_seconds == 0) {
-                        // TODO: IR Launch
+                        canon_shoot_ir();
                         model->current_shot++;
                         
                         // Сброс таймера на интервал между кадрами
