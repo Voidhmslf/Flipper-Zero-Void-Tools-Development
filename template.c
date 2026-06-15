@@ -35,7 +35,7 @@ typedef struct {
     uint32_t interval_s;
     uint32_t shots;
     IntervalometerItem selected_item;
-    
+
     AppState state;
     uint32_t remaining_seconds;
     uint32_t current_shot;
@@ -43,9 +43,27 @@ typedef struct {
 
 // --- IR Команды ---
 
+static uint32_t canon_ir_index = 0;
+static const uint32_t canon_timings[3] = {480, 7330, 480};
+
+FuriHalInfraredTxGetDataState
+    canon_ir_tx_callback(void* context, uint32_t* duration, bool* level) {
+    UNUSED(context);
+    if(canon_ir_index >= 3) return FuriHalInfraredTxGetDataStateLastDone;
+
+    *duration = canon_timings[canon_ir_index];
+    *level = (canon_ir_index % 2 == 0); // true для пульса (0 и 2), false для тишины (1)
+    canon_ir_index++;
+
+    if(canon_ir_index == 3) return FuriHalInfraredTxGetDataStateLastDone;
+    return FuriHalInfraredTxGetDataStateOk;
+}
+
 static void canon_shoot_ir() {
-    const uint32_t canon_timings[] = {480, 7330, 480};
-    furi_hal_infrared_tx(38000, 0.33f, canon_timings, 3);
+    canon_ir_index = 0;
+    furi_hal_infrared_async_tx_set_data_isr_callback(canon_ir_tx_callback, NULL);
+    furi_hal_infrared_async_tx_start(38000, 0.33f);
+    furi_hal_infrared_async_tx_wait_termination();
 }
 
 // --- Отрисовка (View) ---
@@ -57,7 +75,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     canvas_set_font(canvas, FontPrimary);
     elements_multiline_text_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Intervalometer");
 
-    if (m->state == AppStateSetup) {
+    if(m->state == AppStateSetup) {
         // Отрисовка меню настроек
         canvas_set_font(canvas, FontSecondary);
         const uint8_t x_labels = 10;
@@ -65,11 +83,11 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         const uint8_t y_start = 22;
         const uint8_t y_step = 13;
 
-        for (int i = 0; i < IntervalometerItemCount; ++i) {
+        for(int i = 0; i < IntervalometerItemCount; ++i) {
             uint8_t current_y = y_start + (i * y_step);
             bool is_selected = (m->selected_item == i);
 
-            if (is_selected) {
+            if(is_selected) {
                 canvas_set_color(canvas, ColorBlack);
                 canvas_draw_rbox(canvas, 2, current_y - 10, 124, y_step + 1, 2);
                 canvas_set_color(canvas, ColorWhite);
@@ -77,33 +95,33 @@ static void draw_callback(Canvas* canvas, void* ctx) {
                 canvas_set_color(canvas, ColorBlack);
             }
 
-            switch (i) {
-                case IntervalometerItemDelay: {
-                    canvas_draw_str(canvas, x_labels, current_y, "Delay (s):");
-                    FuriString* str = furi_string_alloc_printf("%lu", m->delay_s);
-                    canvas_draw_str(canvas, x_values, current_y, furi_string_get_cstr(str));
-                    furi_string_free(str);
-                    break;
+            switch(i) {
+            case IntervalometerItemDelay: {
+                canvas_draw_str(canvas, x_labels, current_y, "Delay (s):");
+                FuriString* str = furi_string_alloc_printf("%lu", m->delay_s);
+                canvas_draw_str(canvas, x_values, current_y, furi_string_get_cstr(str));
+                furi_string_free(str);
+                break;
+            }
+            case IntervalometerItemInterval: {
+                canvas_draw_str(canvas, x_labels, current_y, "Interval (s):");
+                FuriString* str = furi_string_alloc_printf("%lu", m->interval_s);
+                canvas_draw_str(canvas, x_values, current_y, furi_string_get_cstr(str));
+                furi_string_free(str);
+                break;
+            }
+            case IntervalometerItemShots: {
+                canvas_draw_str(canvas, x_labels, current_y, "Shots:");
+                FuriString* str;
+                if(m->shots == 0) {
+                    str = furi_string_alloc_printf("Inf");
+                } else {
+                    str = furi_string_alloc_printf("%lu", m->shots);
                 }
-                case IntervalometerItemInterval: {
-                    canvas_draw_str(canvas, x_labels, current_y, "Interval (s):");
-                    FuriString* str = furi_string_alloc_printf("%lu", m->interval_s);
-                    canvas_draw_str(canvas, x_values, current_y, furi_string_get_cstr(str));
-                    furi_string_free(str);
-                    break;
-                }
-                case IntervalometerItemShots: {
-                    canvas_draw_str(canvas, x_labels, current_y, "Shots:");
-                    FuriString* str;
-                    if (m->shots == 0) {
-                        str = furi_string_alloc_printf("Inf");
-                    } else {
-                        str = furi_string_alloc_printf("%lu", m->shots);
-                    }
-                    canvas_draw_str(canvas, x_values, current_y, furi_string_get_cstr(str));
-                    furi_string_free(str);
-                    break;
-                }
+                canvas_draw_str(canvas, x_values, current_y, furi_string_get_cstr(str));
+                furi_string_free(str);
+                break;
+            }
             }
         }
 
@@ -112,24 +130,27 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         elements_button_right(canvas, "+");
         elements_button_center(canvas, "Start");
 
-    } else if (m->state == AppStateRunning) {
+    } else if(m->state == AppStateRunning) {
         // Отрисовка экрана прогресса
         canvas_set_font(canvas, FontPrimary);
-        
+
         // Время до следующего кадра
-        FuriString* str_time = furi_string_alloc_printf("Next shot in: %lus", m->remaining_seconds);
-        elements_multiline_text_aligned(canvas, 64, 25, AlignCenter, AlignCenter, furi_string_get_cstr(str_time));
+        FuriString* str_time =
+            furi_string_alloc_printf("Next shot in: %lus", m->remaining_seconds);
+        elements_multiline_text_aligned(
+            canvas, 64, 25, AlignCenter, AlignCenter, furi_string_get_cstr(str_time));
         furi_string_free(str_time);
 
         // Номер текущего кадра
         canvas_set_font(canvas, FontSecondary);
         FuriString* str_shot = furi_string_alloc();
-        if (m->shots == 0) {
+        if(m->shots == 0) {
             furi_string_printf(str_shot, "Shot %lu / Inf", m->current_shot);
         } else {
             furi_string_printf(str_shot, "Shot %lu of %lu", m->current_shot, m->shots);
         }
-        elements_multiline_text_aligned(canvas, 64, 40, AlignCenter, AlignCenter, furi_string_get_cstr(str_shot));
+        elements_multiline_text_aligned(
+            canvas, 64, 40, AlignCenter, AlignCenter, furi_string_get_cstr(str_shot));
         furi_string_free(str_shot);
 
         // Подсказка для кнопки OK
@@ -142,23 +163,18 @@ static void draw_callback(Canvas* canvas, void* ctx) {
 static void input_callback(InputEvent* input_event, void* ctx) {
     furi_assert(ctx);
     FuriMessageQueue* event_queue = ctx;
-    
-    AppEvent event = {
-        .type = EventTypeInput,
-        .input = *input_event
-    };
+
+    AppEvent event = {.type = EventTypeInput, .input = *input_event};
     furi_message_queue_put(event_queue, &event, FuriWaitForever);
 }
 
 static void timer_callback(void* ctx) {
     furi_assert(ctx);
     FuriMessageQueue* event_queue = ctx;
-    
-    AppEvent event = {
-        .type = EventTypeTick
-    };
+
+    AppEvent event = {.type = EventTypeTick};
     // Кладем тик в очередь, если нет места - пропускаем
-    furi_message_queue_put(event_queue, &event, 0); 
+    furi_message_queue_put(event_queue, &event, 0);
 }
 
 // --- Точка входа ---
@@ -175,7 +191,7 @@ int32_t template_app(void* p) {
     model->interval_s = 5;
     model->shots = 0;
     model->selected_item = IntervalometerItemDelay;
-    
+
     model->state = AppStateSetup;
     model->remaining_seconds = 0;
     model->current_shot = 0;
@@ -197,93 +213,96 @@ int32_t template_app(void* p) {
     // Главный цикл обработки событий
     while(running) {
         if(furi_message_queue_get(event_queue, &event, 100) == FuriStatusOk) {
-            
             // Обработка пользовательского ввода
-            if (event.type == EventTypeInput) {
+            if(event.type == EventTypeInput) {
                 if(event.input.type == InputTypePress || event.input.type == InputTypeRepeat) {
-                    
-                    if (model->state == AppStateSetup) {
+                    if(model->state == AppStateSetup) {
                         switch(event.input.key) {
-                            case InputKeyUp:
-                                if(model->selected_item > 0) {
-                                    model->selected_item--;
-                                } else {
-                                    model->selected_item = IntervalometerItemCount - 1;
-                                }
-                                break;
-                            case InputKeyDown:
-                                if(model->selected_item < IntervalometerItemCount - 1) {
-                                    model->selected_item++;
-                                } else {
-                                    model->selected_item = 0;
-                                }
-                                break;
-                            case InputKeyLeft:
-                                if(model->selected_item == IntervalometerItemDelay && model->delay_s > 0) {
-                                    model->delay_s--;
-                                } else if(model->selected_item == IntervalometerItemInterval && model->interval_s > 0) {
-                                    model->interval_s--;
-                                } else if(model->selected_item == IntervalometerItemShots && model->shots > 0) {
-                                    model->shots--;
-                                }
-                                break;
-                            case InputKeyRight:
-                                if(model->selected_item == IntervalometerItemDelay) {
-                                    model->delay_s++;
-                                } else if(model->selected_item == IntervalometerItemInterval) {
-                                    model->interval_s++;
-                                } else if(model->selected_item == IntervalometerItemShots) {
-                                    model->shots++;
-                                }
-                                break;
-                            case InputKeyOk:
-                                // Переход в состояние запущенного таймера
-                                model->state = AppStateRunning;
-                                model->current_shot = 0;
-                                
-                                if (model->delay_s > 0) {
-                                    model->remaining_seconds = model->delay_s;
-                                } else {
-                                    model->remaining_seconds = model->interval_s;
-                                }
-                                
-                                // Запускаем аппаратный таймер раз в секунду
-                                furi_timer_start(timer, furi_ms_to_ticks(1000));
-                                break;
-                            case InputKeyBack:
-                                // Выход только из экрана настроек
-                                running = false;
-                                break;
-                            default:
-                                break;
+                        case InputKeyUp:
+                            if(model->selected_item > 0) {
+                                model->selected_item--;
+                            } else {
+                                model->selected_item = IntervalometerItemCount - 1;
+                            }
+                            break;
+                        case InputKeyDown:
+                            if(model->selected_item < IntervalometerItemCount - 1) {
+                                model->selected_item++;
+                            } else {
+                                model->selected_item = 0;
+                            }
+                            break;
+                        case InputKeyLeft:
+                            if(model->selected_item == IntervalometerItemDelay &&
+                               model->delay_s > 0) {
+                                model->delay_s--;
+                            } else if(
+                                model->selected_item == IntervalometerItemInterval &&
+                                model->interval_s > 0) {
+                                model->interval_s--;
+                            } else if(
+                                model->selected_item == IntervalometerItemShots &&
+                                model->shots > 0) {
+                                model->shots--;
+                            }
+                            break;
+                        case InputKeyRight:
+                            if(model->selected_item == IntervalometerItemDelay) {
+                                model->delay_s++;
+                            } else if(model->selected_item == IntervalometerItemInterval) {
+                                model->interval_s++;
+                            } else if(model->selected_item == IntervalometerItemShots) {
+                                model->shots++;
+                            }
+                            break;
+                        case InputKeyOk:
+                            // Переход в состояние запущенного таймера
+                            model->state = AppStateRunning;
+                            model->current_shot = 0;
+
+                            if(model->delay_s > 0) {
+                                model->remaining_seconds = model->delay_s;
+                            } else {
+                                model->remaining_seconds = model->interval_s;
+                            }
+
+                            // Запускаем аппаратный таймер раз в секунду
+                            furi_timer_start(timer, furi_ms_to_ticks(1000));
+                            break;
+                        case InputKeyBack:
+                            // Выход только из экрана настроек
+                            running = false;
+                            break;
+                        default:
+                            break;
                         }
-                    } else if (model->state == AppStateRunning) {
+                    } else if(model->state == AppStateRunning) {
                         // Остановка съемки пользователем
-                        if (event.input.key == InputKeyBack || event.input.key == InputKeyOk) {
+                        if(event.input.key == InputKeyBack || event.input.key == InputKeyOk) {
                             furi_timer_stop(timer);
                             model->state = AppStateSetup;
                         }
                     }
                     view_port_update(view_port);
                 }
-            } 
+            }
             // Обработка тиков таймера (1 секунда)
-            else if (event.type == EventTypeTick) {
-                if (model->state == AppStateRunning) {
-                    if (model->remaining_seconds > 0) {
+            else if(event.type == EventTypeTick) {
+                if(model->state == AppStateRunning) {
+                    if(model->remaining_seconds > 0) {
                         model->remaining_seconds--;
                     }
-                    
+
                     // Когда время вышло, делаем снимок
-                    if (model->remaining_seconds == 0) {
+                    if(model->remaining_seconds == 0) {
                         canon_shoot_ir();
                         model->current_shot++;
-                        
+
                         // Сброс таймера на интервал между кадрами
                         model->remaining_seconds = model->interval_s;
-                        
+
                         // Если достигли нужного количества кадров — останавливаем
-                        if (model->shots > 0 && model->current_shot >= model->shots) {
+                        if(model->shots > 0 && model->current_shot >= model->shots) {
                             furi_timer_stop(timer);
                             model->state = AppStateSetup;
                         }
